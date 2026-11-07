@@ -13,7 +13,7 @@
     2) Cleveland–McGill (W7)  复现：位置/长度/角度/面积 四种编码的估计误差排序（Cleveland & McGill, 1984）
                       改进：3D 饼图失真（透视把角度压扁，预测比 2D 角度更差）
     3) FORT 地图 (W8)  复现：北向上 vs 航向上（Aretz, 1991）
-                      改进：量化旋转代价——航向角 0°/90°/180°（心理旋转，Shepard & Metzler, 1971）
+                      改进：让车动起来——运动提供光流、持续更新航向，检验是否缩小北向上的旋转代价
 
   使用方法：把下面 PROJECT 改成你在 /hw2 页面得到的 6 位项目码；双击本文件即可运行。
   理论预测与文献见 README.md（收数前已写好，有 commit 记录）。
@@ -53,11 +53,18 @@
 <body>
 
 <div class="box" id="intro">
-  <h1>三个小实验（约 10 分钟）</h1>
-  <p>你将依次完成 <b>3 段</b>：搜索目标、估一估图形大小、判断地图方向。每段都<b>又快又准</b>。</p>
+  <h1>注意实验：知情同意</h1>
+  <div style="background:#f7f9fc;border:1px solid #e0e4eb;border-radius:10px;padding:14px 18px;font-size:14px;line-height:1.7">
+    <p><b>实验说明</b>：本实验是「工程心理学·注意实验室」课程作业的一部分。你将完成 3 个关于视觉注意与空间认知的小任务（视觉搜索、图形估计、地图方向判断），约 10 分钟。</p>
+    <p>· 数据<b>匿名</b>：只用编号，不填真实姓名/学号；数据上传到课程收数接口，仅用于课程作业的统计与分析。</p>
+    <p>· 若选择启用摄像头眼动，<b>视频只在本地浏览器处理、绝不上传</b>，只记录屏幕注视坐标。</p>
+    <p>· 参加完全<b>自愿</b>，可随时关闭页面退出，退出后数据不会被使用。</p>
+    <p>点击下方按钮表示你已阅读并<b>同意</b>以上内容。</p>
+  </div>
+  <p style="margin-top:14px">年龄：<input id="age" type="number" min="1" max="120" style="width:80px">　性别：<select id="gender"><option value="">请选择</option><option>男</option><option>女</option><option>其他</option><option>不愿透露</option></select></p>
   <p>你的昵称或编号（<b>不要填真实姓名/学号</b>）：<input id="pid" placeholder="如 P_小王 或 07" style="min-width:200px"></p>
-  <p><button id="go">开始（含眼动校准）</button>　<button id="go-mouse" style="background:#eef1f6;color:#0D2B5C">只用按键（鼠标模式）</button></p>
-  <p class="muted">「含眼动」会用摄像头记录注视坐标（视频只在本地浏览器处理、不上传）。摄像头需要 <b>localhost 或 https</b> 才能打开——双击 <code>file://</code> 打不开时请改用鼠标模式，或让浏览器用本地服务器打开本页。</p>
+  <p><button id="go">同意并开始（含眼动校准）</button>　<button id="go-mouse" style="background:#eef1f6;color:#0D2B5C">同意并开始（只用按键）</button></p>
+  <p class="muted">「含眼动」会用摄像头记录注视坐标（视频只在本地浏览器处理、不上传）。摄像头需要 <b>localhost 或 https</b> 才能打开。</p>
   <p class="muted" id="cfg"></p>
 </div>
 
@@ -138,22 +145,51 @@ async function initGaze() {
     webgazer.begin();
     webgazer.showPredictionPoints(true);
     await sleep(1500);
+    hideWebcam();
     gazeActive = true;
     return true;
   } catch (e) { console.warn('眼动初始化失败', e); return false; }
 }
+function hideWebcam() {
+  try { if (webgazer && webgazer.showVideoPreview) webgazer.showVideoPreview(false); } catch (e) {}
+  const vf = document.getElementById('webgazerVideoFeed'); if (vf) vf.style.display = 'none';
+  const vc = document.getElementById('webgazerVideoCanvas'); if (vc) vc.style.display = 'none';
+}
+function showCalibDot(x, y, hint) {
+  return new Promise((res) => {
+    ctx.fillStyle = '#202532'; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#C8A44A'; ctx.beginPath(); ctx.arc(x, y, 20, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.font = '700 22px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(hint, W / 2, H - 74);
+    ctx.fillStyle = '#9aa3b2'; ctx.font = '500 16px sans-serif'; ctx.fillText('盯着这个点，然后点击它（或按空格/回车）', W / 2, H - 46);
+    const done = () => { window.removeEventListener('click', onClick); window.removeEventListener('keydown', onKey); res(); };
+    const onClick = () => done();
+    const onKey = (e) => { if (e.code === 'Space' || e.code === 'Enter') { e.preventDefault(); done(); } };
+    window.addEventListener('click', onClick);
+    window.addEventListener('keydown', onKey);
+  });
+}
 async function calibrate() {
   const pts = [[0.1, 0.1], [0.5, 0.1], [0.9, 0.1], [0.1, 0.5], [0.5, 0.5], [0.9, 0.5], [0.1, 0.9], [0.5, 0.9], [0.9, 0.9]];
-  for (const [fx, fy] of pts) {
+  for (let i = 0; i < pts.length; i++) {
+    const [fx, fy] = pts[i];
     const x = Math.round(fx * W), y = Math.round(fy * H);
-    ctx.fillStyle = '#202532'; ctx.fillRect(0, 0, W, H);
-    ctx.fillStyle = '#C8A44A'; ctx.beginPath(); ctx.arc(x, y, 18, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = '#fff'; ctx.font = '700 20px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('盯住这个点', x, y - 36);
-    await sleep(900);
+    await showCalibDot(x, y, `校准 ${i + 1}/${pts.length}`);
     if (webgazer && webgazer.recordClickPosition) webgazer.recordClickPosition(x, y, 'click');
   }
   if (webgazer && webgazer.showPredictionPoints) webgazer.showPredictionPoints(false);
   ctx.fillStyle = '#202532'; ctx.fillRect(0, 0, W, H);
+}
+async function validate() {
+  const pts = [[0.3, 0.3], [0.7, 0.3], [0.5, 0.7]];
+  const errs = [];
+  for (let i = 0; i < pts.length; i++) {
+    const [fx, fy] = pts[i];
+    const x = Math.round(fx * W), y = Math.round(fy * H);
+    await showCalibDot(x, y, `验证 ${i + 1}/${pts.length}`);
+    const p = (webgazer && webgazer.getCurrentPrediction) ? webgazer.getCurrentPrediction() : null;
+    if (p && isFinite(p.x) && isFinite(p.y)) errs.push(Math.hypot(p.x - x, p.y - y));
+  }
+  return errs.length ? mean(errs) : null;
 }
 
 // ====================== 3. 实验一：视觉搜索（W6） ======================
@@ -209,7 +245,7 @@ async function searchTrial(tr, practice) {
   ctx.fillStyle = '#202532'; ctx.fillRect(0, 0, W, H);
   const want = tr.present ? 'KeyF' : 'KeyJ';
   const ok = r.key === want;
-  await feedback(r.key == null ? '太慢了' : ok ? '✓' : '✗', r.key == null ? '#ffd54a' : ok ? '#7CFC9A' : '#ff8a80', 350);
+  if (practice) await feedback(r.key == null ? '太慢了' : ok ? '✓' : '✗', r.key == null ? '#ffd54a' : ok ? '#7CFC9A' : '#ff8a80', 350);
   await sleep(350);
   return { type: tr.type, dir: tr.dir || '', N: tr.N, present: tr.present, key: r.key || '', rt: r.rt == null ? 0 : Math.round(r.rt), correct: ok ? 1 : 0, timeout: r.key == null ? 1 : 0, dirty, ...(gaze.length ? { samples: gaze } : {}) };
 }
@@ -333,21 +369,26 @@ function makeFortScene(side) {
   return { side, blocks, target };
 }
 function fortRoad(ctx, x1, y1, x2, y2) { ctx.lineCap = 'butt'; ctx.strokeStyle = '#c3c8d0'; ctx.lineWidth = 52; ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke(); ctx.strokeStyle = '#fff'; ctx.lineWidth = 44; ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke(); }
-function drawFort(sc, mode, h) {
+function drawFort(sc, mode, h, scroll = 0) {
   const CX = W / 2, CY = H / 2, HALF = Math.floor(Math.min(W, H) * 0.46);
   const a = mode === 'north' ? h * Math.PI / 180 : 0;
   ctx.fillStyle = '#1b1f27'; ctx.fillRect(0, 0, W, H);
   ctx.save(); ctx.beginPath(); ctx.rect(CX - HALF, CY - HALF, HALF * 2, HALF * 2); ctx.clip();
   ctx.fillStyle = '#eef0e6'; ctx.fillRect(CX - HALF, CY - HALF, HALF * 2, HALF * 2);
-  ctx.translate(CX, CY); ctx.rotate(a);
+  // 世界（街区/道路/目的地）随车前进向下滚动
+  ctx.save(); ctx.translate(CX, CY); ctx.rotate(a); ctx.translate(0, scroll);
   for (const b of sc.blocks) { ctx.fillStyle = b.kind === 'park' ? '#cfe5c0' : b.kind === 'water' ? '#bcd6ee' : '#e2ddd2'; ctx.fillRect(b.x, b.y, b.w, b.h); }
   fortRoad(ctx, 0, 700, 0, -700); fortRoad(ctx, -700, -220, 700, -220);
-  ctx.fillStyle = '#1565c0'; ctx.strokeStyle = '#fff'; ctx.lineWidth = 4;
-  ctx.beginPath(); ctx.moveTo(0, -30); ctx.lineTo(22, 22); ctx.lineTo(0, 12); ctx.lineTo(-22, 22); ctx.closePath(); ctx.fill(); ctx.stroke();
   const tx = sc.target.x, ty = sc.target.y;
-  ctx.fillStyle = '#c62828'; ctx.beginPath(); ctx.arc(tx, ty, 16, 0, Math.PI * 2); ctx.fill(); ctx.strokeStyle = '#fff'; ctx.stroke();
+  ctx.fillStyle = '#c62828'; ctx.beginPath(); ctx.arc(tx, ty, 16, 0, Math.PI * 2); ctx.fill(); ctx.strokeStyle = '#fff'; ctx.lineWidth = 4; ctx.stroke();
   ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(tx, ty, 5, 0, Math.PI * 2); ctx.fill();
   ctx.fillStyle = '#c62828'; ctx.font = '700 18px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('目的地', tx, ty - 30);
+  ctx.restore();
+  // 车固定居中，随航向旋转（不滚动）
+  ctx.save(); ctx.translate(CX, CY); ctx.rotate(a);
+  ctx.fillStyle = '#1565c0'; ctx.strokeStyle = '#fff'; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.moveTo(0, -30); ctx.lineTo(22, 22); ctx.lineTo(0, 12); ctx.lineTo(-22, 22); ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.restore();
   ctx.restore();
   // 指北针
   const pcx = CX + HALF - 52, pcy = CY - HALF + 52, pa = mode === 'north' ? 0 : -h * Math.PI / 180;
@@ -363,54 +404,78 @@ function drawFort(sc, mode, h) {
   ctx.fillStyle = '#8e97a8'; ctx.font = '500 20px sans-serif';
   ctx.fillText('← 左边　　→ 右边（以车头方向为准）', CX, CY + HALF + 76);
 }
-async function fortTrial(cond, h, side, practice) {
-  const sc = makeFortScene(side);
+async function fortTrial(t, practice) {
+  const sc = makeFortScene(t.side);
   ctx.fillStyle = '#1b1f27'; ctx.fillRect(0, 0, W, H);
   const CX = W / 2, CY = H / 2, s = 16;
   ctx.strokeStyle = '#cfd6e2'; ctx.lineWidth = 3;
   ctx.beginPath(); ctx.moveTo(CX - s, CY); ctx.lineTo(CX + s, CY); ctx.moveTo(CX, CY - s); ctx.lineTo(CX, CY + s); ctx.stroke();
   await sleep(350);
-  drawFort(sc, cond === 'track' ? 'track' : 'north', h); await nextFrame();
+  if (t.moving) {
+    const dur = 900, t0a = performance.now();
+    while (performance.now() - t0a < dur) {
+      drawFort(sc, t.mode, t.h, 190 * (performance.now() - t0a) / dur);
+      await nextFrame();
+    }
+    drawFort(sc, t.mode, t.h, 190);
+  } else {
+    drawFort(sc, t.mode, t.h, 0);
+  }
+  await nextFrame();
   startGazeRec();
   blurFlag = false; const t0 = performance.now();
   const r = await waitKey(FORT_KEYS, 6000, t0);
   const gaze = stopGazeRec();
   const dirty = blurFlag ? 1 : 0;
   ctx.fillStyle = '#1b1f27'; ctx.fillRect(0, 0, W, H);
-  const ok = r.key === side;
-  await feedback(r.key == null ? '太慢了' : ok ? '✓' : '✗ 反了', r.key == null ? '#ffd54a' : ok ? '#7CFC9A' : '#ff8a80', practice ? 800 : 380);
+  const ok = r.key === (t.side === 'L' ? 'ArrowLeft' : 'ArrowRight');
+  if (practice) await feedback(r.key == null ? '太慢了' : ok ? '✓' : '✗ 反了', r.key == null ? '#ffd54a' : ok ? '#7CFC9A' : '#ff8a80', 800);
   await sleep(300);
-  return { cond, h, side, key: r.key || '', rt: r.rt == null ? 0 : Math.round(r.rt), correct: ok ? 1 : 0, timeout: r.key == null ? 1 : 0, dirty, ...(gaze.length ? { samples: gaze } : {}) };
+  return { cond: t.cond, moving: t.moving ? 1 : 0, h: t.h, side: t.side, key: r.key || '', rt: r.rt == null ? 0 : Math.round(r.rt), correct: ok ? 1 : 0, timeout: r.key == null ? 1 : 0, dirty, ...(gaze.length ? { samples: gaze } : {}) };
+}
+function buildFortBlock(mode, moving, n) {
+  const list = [];
+  for (let k = 0; k < n; k++) {
+    const side = k % 2 ? 'R' : 'L';
+    const h = mode === 'north' ? [90, -90, 180][k % 3] : 0;
+    list.push({ cond: (mode === 'north' ? 'north' : 'track') + (moving ? '_move' : '_static'), mode, moving, h, side });
+  }
+  return shuffle(list);
 }
 async function runFort(order) {
   setLegend('');
   const trials = [];
-  const blockOf = { track: { mode: 'track', label: '航向上（地图随车转，车头永远朝上）' }, north: { mode: 'north', label: '北向上（地图不转、北永远朝上，车箭头会朝各个方向）' } };
-  for (const b of order) {
-    const B = blockOf[b];
+  const blockMeta = {
+    track_static: { mode: 'track', moving: false, label: '航向上 · 静止' },
+    north_static: { mode: 'north', moving: false, label: '北向上 · 静止' },
+    track_move: { mode: 'track', moving: true, label: '航向上 · 运动（改进）' },
+    north_move: { mode: 'north', moving: true, label: '北向上 · 运动（改进）' },
+  };
+  for (const id of order) {
+    const B = blockMeta[id];
     await instruct(`<h2>目的地在左还是右？</h2>
       <p><b style="color:#1565c0">蓝色箭头</b>是你的车，正开向<b>下一个路口</b>；<b style="color:#c62828">红点</b>是目的地。</p>
       <p>请判断：到了下一个路口，目的地在<b>你的车的左边还是右边</b>（以车头方向为准，不是屏幕左右）。</p>
       <p style="text-align:center"><kbd>←</kbd> 左边　　<kbd>→</kbd> 右边</p>
       <p>这一段：<b>${B.label}</b>。</p>
-      ${b === 'north' ? '<p class="muted">改进条件：北向上地图里车的航向会变化（朝北 0°、朝东/西 90°、朝南 180°）——航向与「上」的夹角越大，你越需要把地图在脑子里转过来，反应越慢。</p>' : ''}`, '开始练习');
-    for (let k = 0; k < 3; k++) { hud(`地图 练习 ${k + 1}/3`); await fortTrial(b === 'track' ? 'track' : 'north', [0, 90, 180][k], k % 2 ? 'R' : 'L', true); }
-    await instruct(`<h2>练习结束</h2><p>正式作答：${B.label}。</p>`, '开始');
-    const list = b === 'track'
-      ? shuffle(Array.from({ length: 12 }, (_, k) => ({ cond: 'track', h: 0, side: k % 2 ? 'R' : 'L' })))
-      : shuffle(['north0', 'north90', 'north180'].flatMap(c => Array.from({ length: 12 }, (_, k) => ({ cond: c, h: c === 'north0' ? 0 : c === 'north90' ? (k % 4 < 2 ? 90 : -90) : 180, side: k % 2 ? 'R' : 'L' }))));
-    for (let k = 0; k < list.length; k++) { hud(`地图 ${k + 1}/${list.length}`); trials.push(await fortTrial(list[k].cond, list[k].h, list[k].side, false)); }
+      ${B.moving ? '<p class="muted">改进条件：这一段<b>车会动起来</b>，一路开向路口，像真实开车一样——请在看清楚后作答。</p>' : '<p class="muted">这一段地图<b>静止</b>，直接判断即可。</p>'}
+      ${B.mode === 'north' ? '<p class="muted">北向上：地图北永远朝上，车的航向会变化，需要你在脑中把地图转过来。</p>' : ''}`, '开始练习');
+    for (let k = 0; k < 3; k++) { hud(`地图 练习 ${k + 1}/3`); await fortTrial({ mode: B.mode, moving: B.moving, h: B.mode === 'north' ? [90, -90, 180][k] : 0, side: k % 2 ? 'R' : 'L', cond: id }, true); }
+    await instruct(`<h2>练习结束</h2><p>正式作答：${B.label}。正式阶段<b>不再显示对错</b>，保持又快又准。</p>`, '开始');
+    const list = buildFortBlock(B.mode, B.moving, 12);
+    for (let k = 0; k < list.length; k++) { hud(`地图 ${k + 1}/${list.length}`); trials.push(await fortTrial(list[k], false)); }
   }
   return trials;
 }
 
 // ====================== 6. 提交与读取 ======================
+let DEMO = {};
 async function submitData(participant, experiment, trials) {
   const exp = (TEST_MODE ? 'test_' : '') + experiment;
   try {
     const res = await fetch(LAB + '/api/hw2/submit', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ project: PROJECT, experiment: exp, participant, trials, meta: { ua: navigator.userAgent.slice(0, 80), w: innerWidth, h: innerHeight } }),
+      body: JSON.stringify({ project: PROJECT, experiment: exp, participant, trials, meta: { ua: navigator.userAgent.slice(0, 80), w: innerWidth, h: innerHeight, ...DEMO } }),
     });
     const r = await res.json();
     if (!r.ok) throw new Error(r.msg);
@@ -497,27 +562,27 @@ function renderSearchChart(trials) {
 }
 
 async function showResults(mine, notes) {
-  let html = `<h2>你的结果</h2>`;
+  let html = `<h2>实验结束 · 感谢参与</h2><p class="muted">你完成了 3 个实验：视觉搜索（注意的并行/串行加工）、Cleveland–McGill（图形知觉编码）、FORT 地图（参照系变换）。下面是你的结果，以及与原文的对比。</p><h2>你的结果</h2>`;
   html += `<h3>视觉搜索（斜率 ms/项，越大越「逐个找」）</h3><table><tr><th>条件</th><th>有目标斜率</th><th>无目标斜率</th></tr>`;
   const sc = { fP: searchSlope(mine.search, t => t.type === 'feature' && t.present === 1), fA: searchSlope(mine.search, t => t.type === 'feature' && t.present === 0), cP: searchSlope(mine.search, t => t.type === 'conj' && t.present === 1), cA: searchSlope(mine.search, t => t.type === 'conj' && t.present === 0), oP: searchSlope(mine.search, t => t.type === 'asym' && t.dir === 'O' && t.present === 1), qP: searchSlope(mine.search, t => t.type === 'asym' && t.dir === 'Q' && t.present === 1) };
   const f = (s) => s && s.slope != null ? s.slope.toFixed(1) : '—';
   html += `<tr><td>特征搜索</td><td><b>${f(sc.fP)}</b></td><td>${f(sc.fA)}</td></tr><tr><td>联合搜索</td><td><b>${f(sc.cP)}</b></td><td>${f(sc.cA)}</td></tr><tr><td>不对称 · 找O(缺特征)</td><td><b>${f(sc.oP)}</b></td><td>—</td></tr><tr><td>不对称 · 找Q(有特征)</td><td><b>${f(sc.qP)}</b></td><td>—</td></tr></table>`;
   html += `<p class="muted">参考（Treisman & Gelade 1980）：特征 有 3.1 / 无 25.1；联合 有 28.7 / 67.1。</p>`;
   html += `<h3>搜索斜率模型可视化（FIT）</h3><p class="muted">实线=你的数据拟合，虚线=原文斜率。特征搜索近于平行、联合搜索递增。</p><div id="searchchart"></div>`;
-  if (gazeActive) html += `<h3>你的注视热力图（视觉搜索）</h3><p class="muted">颜色越深代表注视越集中。</p><div id="heat"></div>`;
+  if (gazeActive) { const nSamp = mine.search.reduce((a, t) => a + (t.samples ? t.samples.length / 2 : 0), 0); html += `<h3>你的注视热力图（视觉搜索）</h3><p class="muted">眼动已采集：视觉搜索段共 ${nSamp} 个注视样本。颜色越深代表注视越集中。</p><div id="heat"></div>`; }
 
   html += `<h3>Cleveland–McGill（平均估计误差，百分点，越小越准）</h3><table><tr><th>编码</th><th>平均误差</th></tr>`;
   for (const enc of CM_ENC) html += `<tr><td>${CM_LABEL[enc]}</td><td><b>${cmErr(mine.cm, t => t.enc === enc)?.toFixed(1) ?? '—'}</b></td></tr>`;
   html += `</table><p class="muted">预测排序：位置 &lt; 长度 &lt; 角度 &lt; 面积，且 3D 角度 &gt; 角度（3D 失真更差）。</p>`;
 
   html += `<h3>FORT 地图（正确反应时）</h3><table><tr><th>条件</th><th>反应时</th><th>正确率</th></tr>`;
-  const fortConds = ['track', 'north0', 'north90', 'north180'], fortName = { track: '航向上（对齐）', north0: '北向上 · 0°', north90: '北向上 · 90°', north180: '北向上 · 180°' };
+  const fortConds = ['track_static', 'north_static', 'track_move', 'north_move'], fortName = { track_static: '航向上·静止', north_static: '北向上·静止', track_move: '航向上·运动', north_move: '北向上·运动' };
   for (const c of fortConds) {
     const rt = meanRT(mine.fort, t => t.cond === c);
     const corr = mine.fort.filter(t => t.cond === c); const acc = corr.length ? (corr.filter(t => t.correct === 1).length / corr.length * 100) : null;
     html += `<tr><td>${fortName[c]}</td><td><b>${ms(rt)}</b></td><td>${acc != null ? acc.toFixed(0) + '%' : '—'}</td></tr>`;
   }
-  html += `</table><p class="muted">预测：航向上 ≈ 0° &lt; 90° &lt; 180°（旋转代价，心理旋转）。</p>`;
+  html += `</table><p class="muted">预测：静止时航向上 &lt; 北向上（复现 Aretz 1991）；运动提供光流、持续更新航向，应缩小北向上的旋转代价（北向上·运动 &lt; 北向上·静止）。</p>`;
 
   html += `<p class="muted">${notes.join('<br>')}</p><h2>全体被试（匿名）</h2>`;
   try {
@@ -530,7 +595,7 @@ async function showResults(mine, notes) {
       let eff = '—';
       if (exp === 'search') { const s = searchSlope(all, t => t.type === 'feature' && t.present === 1); eff = `特征搜索有目标斜率 ${f(s)}`; }
       else if (exp === 'cm') { const e = cmErr(all, t => t.enc === 'position'); eff = `位置编码平均误差 ${e != null ? e.toFixed(1) : '—'}`; }
-      else { const t = meanRT(all, t => t.cond === 'track'), n0 = meanRT(all, t => t.cond === 'north180'); eff = `航向上 ${ms(t)} vs 180° ${ms(n0)}`; }
+      else { const t = meanRT(all, t => t.cond === 'track_static'), n0 = meanRT(all, t => t.cond === 'north_static'); eff = `航向上 ${ms(t)} vs 北向上 ${ms(n0)}（静止）`; }
       html += `<tr><td>${exp}</td><td>${n}</td><td>${eff}</td></tr>`;
     }
     html += `</table>`;
@@ -543,26 +608,37 @@ async function showResults(mine, notes) {
 // ====================== 8. 主流程 ======================
 async function start(useGaze) {
   const participant = $('pid').value.trim();
+  const age = parseInt($('age').value, 10);
+  const gender = $('gender').value;
   if (!participant) return alert('请先填写昵称或编号');
+  if (!isFinite(age) || age < 1 || age > 120) return alert('请填写年龄');
+  if (!gender) return alert('请选择性别');
+  DEMO = { age, gender };
   $('intro').style.display = 'none'; $('stage').style.display = 'block'; fitCanvas();
 
   gazeActive = false;
+  let gazeErr = null;
   if (useGaze) {
-    await instruct(`<h2>摄像头眼动说明</h2><p>将开启摄像头估计你的注视点。<b>视频只在本地浏览器处理，绝不上传</b>，只记录屏幕上的注视坐标。请坐正、保持头部基本不动。</p><p>同意则进入校准。</p>`, '同意并校准');
+    await instruct(`<h2>摄像头眼动说明</h2><p>将开启摄像头估计你的注视点。<b>视频只在本地浏览器处理、绝不上传、也不会显示在屏幕上</b>，只记录注视坐标。请坐正、保持头部基本不动。</p><p>同意则进入校准。</p>`, '同意并校准');
     const ok = await initGaze();
     if (!ok) {
-      await instruct(`<h2>无法启用摄像头</h2><p>可能没有摄像头、被浏览器拒绝，或页面不是 <b>localhost / https</b>（双击 <code>file://</code> 打不开摄像头）。将改用<b>鼠标模式</b>，只记录按键。</p>`, '继续');
+      await instruct(`<h2>无法启用摄像头</h2><p>可能没有摄像头、被浏览器拒绝，或页面不是 <b>localhost / https</b>。将改用<b>鼠标模式</b>，只记录按键。</p>`, '继续');
     } else {
-      await instruct(`<h2>开始 9 点校准</h2><p>下面会依次出现 9 个点，请<b>盯着每个点</b>、保持头部不动，每个点约 1 秒。</p>`, '开始校准');
+      await instruct(`<h2>9 点校准</h2><p>下面依次出现 9 个点：请<b>盯着每个点，然后点击它</b>（或按空格/回车），保持头部不动。</p>`, '开始校准');
       await calibrate();
+      await instruct(`<h2>验证</h2><p>接下来 3 个点用于<b>检验校准误差</b>：同样盯着点并点击。</p>`, '开始验证');
+      gazeErr = await validate();
+      if (gazeErr == null) await instruct(`<h2>验证未通过</h2><p>未能读到注视预测，校准可能不够好。仍会记录眼动数据（质量可能偏低）。</p>`, '继续');
+      else if (gazeErr > 200) await instruct(`<h2>校准误差偏大</h2><p>验证误差约 <b>${Math.round(gazeErr)} px</b>（约 ${(gazeErr / 50).toFixed(1)}°）。建议重新校准；也可继续，数据会标记为低质量。</p>`, '继续（可能低质量）');
+      else await instruct(`<h2>校准通过</h2><p>验证误差约 <b>${Math.round(gazeErr)} px</b>（约 ${(gazeErr / 50).toFixed(1)}°），精度不错。</p>`, '开始实验');
     }
   }
 
   const ph = hash(participant);
   const searchOrder = ((ph >> 1) % 2) ? ['conj', 'feature', 'asym'] : ['feature', 'conj', 'asym'];
-  const fortOrder = (ph % 2) ? ['track', 'north'] : ['north', 'track'];
+  const fortOrder = shuffle(['track_static', 'north_static', 'track_move', 'north_move']);
   const mine = {}, notes = [];
-  if (gazeActive) notes.push('眼动已开启（每个试次记录注视坐标 samples）');
+  if (gazeActive) notes.push(`眼动已开启，校准误差约 ${gazeErr != null ? Math.round(gazeErr) + ' px' : '—'}（每个试次记录注视坐标 samples）`);
 
   await instruct(`<h2>第 1/3 段：搜索目标（视觉搜索）</h2><p>准备好了就开始。</p>`, '开始');
   mine.search = await runSearch(searchOrder);
