@@ -2,7 +2,7 @@
 
 > **项目码**：`3MA2NB`（已填进 `index.html` 顶部 `const PROJECT` 那一行）。
 >
-> **公开链接（GitHub Pages）**：（部署后把链接写在这里，并填到仓库首页 About 的 Website 栏）
+> **公开链接（GitHub Pages）**：https://use-epy.github.io/attention-hw2/ （在仓库 Settings 开启 Pages 后生效；也请填到仓库首页 About 的 Website 栏）
 
 ## 运行方法
 
