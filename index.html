@@ -131,7 +131,16 @@ function waitKey(valid, timeoutMs, t0) {
 
 // ====================== WebGazer 眼动 ======================
 let gazeActive = false, gazeRecording = false, gazeSamples = [];
-function startGazeRec() { if (gazeActive) { gazeSamples = []; gazeRecording = true; } }
+async function gazeRecordLoop() {
+  while (gazeRecording) {
+    try {
+      const p = webgazer.getCurrentPrediction ? await webgazer.getCurrentPrediction() : null;
+      if (p && isFinite(p.x) && isFinite(p.y) && gazeRecording) gazeSamples.push(Math.round(p.x), Math.round(p.y));
+    } catch (e) {}
+    await sleep(80);
+  }
+}
+function startGazeRec() { if (gazeActive) { gazeSamples = []; gazeRecording = true; gazeRecordLoop(); } }
 function stopGazeRec() { gazeRecording = false; return gazeActive ? gazeSamples.slice(0, 500) : []; }
 async function canUseCamera() {
   try { if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return false; const s = await navigator.mediaDevices.getUserMedia({ video: true }); s.getTracks().forEach(t => t.stop()); return true; } catch (e) { return false; }
@@ -141,7 +150,6 @@ async function initGaze() {
   if (!(await canUseCamera())) return false;
   try {
     webgazer.setRegression('ridge');
-    webgazer.setGazeListener((data) => { if (data && gazeRecording) { gazeSamples.push(Math.round(data.x), Math.round(data.y)); } });
     webgazer.begin();
     webgazer.showPredictionPoints(true);
     await sleep(1500);
@@ -151,9 +159,11 @@ async function initGaze() {
   } catch (e) { console.warn('眼动初始化失败', e); return false; }
 }
 function hideWebcam() {
-  try { if (webgazer && webgazer.showVideoPreview) webgazer.showVideoPreview(false); } catch (e) {}
-  const vf = document.getElementById('webgazerVideoFeed'); if (vf) vf.style.display = 'none';
-  const vc = document.getElementById('webgazerVideoCanvas'); if (vc) vc.style.display = 'none';
+  // 不能 display:none——浏览器会停止渲染视频帧、人脸检测就断；改为移出屏幕（仍在渲染）
+  const off = 'position:fixed;left:-9999px;top:0;width:320px;height:240px;pointer-events:none;';
+  const vf = document.getElementById('webgazerVideoFeed'); if (vf) vf.style.cssText = off;
+  const vc = document.getElementById('webgazerVideoCanvas'); if (vc) vc.style.cssText = off;
+  try { if (webgazer && webgazer.showFaceOverlay) webgazer.showFaceOverlay(false); } catch (e) {}
 }
 function showCalibDot(x, y, hint) {
   return new Promise((res) => {
@@ -186,10 +196,20 @@ async function validate() {
     const [fx, fy] = pts[i];
     const x = Math.round(fx * W), y = Math.round(fy * H);
     await showCalibDot(x, y, `验证 ${i + 1}/${pts.length}`);
-    const p = (webgazer && webgazer.getCurrentPrediction) ? webgazer.getCurrentPrediction() : null;
+    let p = null;
+    try { p = (webgazer && webgazer.getCurrentPrediction) ? await webgazer.getCurrentPrediction() : null; } catch (e) {}
     if (p && isFinite(p.x) && isFinite(p.y)) errs.push(Math.hypot(p.x - x, p.y - y));
   }
   return errs.length ? mean(errs) : null;
+}
+async function gazeHealthCheck() {
+  let ok = 0;
+  const t0 = performance.now();
+  while (performance.now() - t0 < 2000) {
+    try { const p = webgazer.getCurrentPrediction ? await webgazer.getCurrentPrediction() : null; if (p && isFinite(p.x) && isFinite(p.y)) ok++; } catch (e) {}
+    await sleep(120);
+  }
+  return ok;
 }
 
 // ====================== 3. 实验一：视觉搜索（W6） ======================
@@ -628,9 +648,13 @@ async function start(useGaze) {
       await calibrate();
       await instruct(`<h2>验证</h2><p>接下来 3 个点用于<b>检验校准误差</b>：同样盯着点并点击。</p>`, '开始验证');
       gazeErr = await validate();
-      if (gazeErr == null) await instruct(`<h2>验证未通过</h2><p>未能读到注视预测，校准可能不够好。仍会记录眼动数据（质量可能偏低）。</p>`, '继续');
-      else if (gazeErr > 200) await instruct(`<h2>校准误差偏大</h2><p>验证误差约 <b>${Math.round(gazeErr)} px</b>（约 ${(gazeErr / 50).toFixed(1)}°）。建议重新校准；也可继续，数据会标记为低质量。</p>`, '继续（可能低质量）');
-      else await instruct(`<h2>校准通过</h2><p>验证误差约 <b>${Math.round(gazeErr)} px</b>（约 ${(gazeErr / 50).toFixed(1)}°），精度不错。</p>`, '开始实验');
+      const healthOk = await gazeHealthCheck();
+      let calibMsg;
+      if (gazeErr == null && healthOk === 0) calibMsg = `<h2>眼动预测未启动</h2><p>验证读不到注视点、健康检查也没收到预测——很可能是<b>人脸没被检测到</b>（请坐正、光线充足、脸在摄像头内），或模型加载失败。眼动数据会为空，但按键数据仍会正常记录。</p>`;
+      else if (gazeErr == null) calibMsg = `<h2>验证未通过</h2><p>验证读不到注视点（但预测在跑，2 秒收到 ${healthOk} 次）。校准可能不够准，仍会记录眼动（质量偏低）。</p>`;
+      else if (gazeErr > 200) calibMsg = `<h2>校准误差偏大</h2><p>验证误差约 <b>${Math.round(gazeErr)} px</b>（约 ${(gazeErr / 50).toFixed(1)}°）。建议重新校准；也可继续，数据会标记为低质量。</p>`;
+      else calibMsg = `<h2>校准通过</h2><p>验证误差约 <b>${Math.round(gazeErr)} px</b>（约 ${(gazeErr / 50).toFixed(1)}°），2 秒内收到 ${healthOk} 次预测，精度不错。</p>`;
+      await instruct(calibMsg, '开始实验');
     }
   }
 
