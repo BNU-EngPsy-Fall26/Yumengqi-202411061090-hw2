@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>注意实验：复现 + 改进（视觉搜索 / Cleveland–McGill / FORT 地图）</title>
+<!--
+  作业二 · 单文件网页实验（工程心理学 · 注意实验室）
+  -------------------------------------------------
+  三个实验跨越 W6–W8、三种不同范式，每个都 = 经典复现 + 一个改进条件：
+    1) 视觉搜索 (W6)  复现：特征搜索 vs 联合搜索（Treisman & Gelade, 1980）
+                      改进：搜索不对称——有特征(Q中找O) vs 缺特征(O中找Q)（Treisman & Souther, 1985）
+    2) Cleveland–McGill (W7)  复现：位置/长度/角度/面积 四种编码的估计误差排序（Cleveland & McGill, 1984）
+                      改进：3D 饼图失真（透视把角度压扁，预测比 2D 角度更差）
+    3) FORT 地图 (W8)  复现：北向上 vs 航向上（Aretz, 1991）
+                      改进：量化旋转代价——航向角 0°/90°/180°（心理旋转，Shepard & Metzler, 1971）
+
+  使用方法：把下面 PROJECT 改成你在 /hw2 页面得到的 6 位项目码；双击本文件即可运行。
+  理论预测与文献见 README.md（收数前已写好，有 commit 记录）。
+-->
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: "PingFang SC", "Microsoft YaHei", sans-serif; background: #f5f7fa; color: #323c50; }
+  .box { max-width: 800px; margin: 36px auto; background: #fff; border-radius: 14px; padding: 26px 32px; box-shadow: 0 4px 20px rgba(13,43,92,.08); }
+  h1, h2 { color: #0D2B5C; }
+  h1 { margin-top: 0; }
+  button { padding: 10px 26px; border: none; border-radius: 8px; background: #C8A44A; color: #fff; font-size: 16px; cursor: pointer; }
+  input { padding: 9px 11px; font-size: 15px; border: 1px solid #ccd; border-radius: 6px; }
+  kbd { padding: 1px 8px; border: 1px solid #ccd; border-bottom-width: 2px; border-radius: 5px; background: #f7f8fa; font-family: inherit; }
+  .muted { color: #788296; font-size: 13px; }
+  table { border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 14px; }
+  th, td { border: 1px solid #e0e4eb; padding: 6px 10px; text-align: center; }
+  th { background: #f4f6fa; }
+  .warn { background:#fff7e0; border-left:4px solid #C8A44A; padding:8px 12px; border-radius:6px; }
+
+  #stage { position: fixed; inset: 0; background: #202532; display: none; }
+  #cv { display: block; }
+  #hud { position: absolute; top: 14px; left: 0; width: 100%; text-align: center; color: #cfd6e4; font-size: 17px; pointer-events: none; }
+  #fb { position: absolute; top: 12%; width: 100%; text-align: center; font-size: 30px; font-weight: 700; display: none; pointer-events: none; }
+  #legend { position: absolute; bottom: 6%; width: 100%; display: flex; gap: 26px; justify-content: center; color: #fff; font-size: 18px; pointer-events: none; }
+  #legend .lg { text-align: center; }
+  #legend .sw { display: inline-block; width: 44px; height: 26px; border-radius: 6px; vertical-align: middle; }
+
+  #instruct { position: fixed; inset: 0; background: rgba(15,20,33,.82); display: none; align-items: center; justify-content: center; z-index: 10; }
+  .instruct-box { max-width: 680px; background: #fff; border-radius: 14px; padding: 26px 30px; line-height: 1.7; }
+  .instruct-box h2 { margin-top: 0; }
+  .instruct-box button { margin-top: 14px; }
+  .sample { font-size: 24px; font-weight: 800; letter-spacing: 2px; }
+  .red { color: #e0352b; } .blue { color: #2a6fdb; } .navy { color: #0D2B5C; }
+</style>
+<script src="https://webgazer.cs.brown.edu/webgazer.js"></script>
+</head>
+<body>
+
+<div class="box" id="intro">
+  <h1>三个小实验（约 10 分钟）</h1>
+  <p>你将依次完成 <b>3 段</b>：搜索目标、估一估图形大小、判断地图方向。每段都<b>又快又准</b>。</p>
+  <p>你的昵称或编号（<b>不要填真实姓名/学号</b>）：<input id="pid" placeholder="如 P_小王 或 07" style="min-width:200px"></p>
+  <p><button id="go">开始（含眼动校准）</button>　<button id="go-mouse" style="background:#eef1f6;color:#0D2B5C">只用按键（鼠标模式）</button></p>
+  <p class="muted">「含眼动」会用摄像头记录注视坐标（视频只在本地浏览器处理、不上传）。摄像头需要 <b>localhost 或 https</b> 才能打开——双击 <code>file://</code> 打不开时请改用鼠标模式，或让浏览器用本地服务器打开本页。</p>
+  <p class="muted" id="cfg"></p>
+</div>
+
+<div id="stage"><div id="hud"></div><div id="fb"></div><canvas id="cv"></canvas><div id="legend"></div></div>
+<div id="instruct"></div>
+<div class="box" id="result" style="display:none"></div>
+
+<script>
+// ====================== 1. 配置 ======================
+const PROJECT = new URLSearchParams(location.search).get('project') || '3MA2NB';
+const LAB = /attention-lab|127\.0\.0\.1|localhost/.test(location.host) ? location.origin : 'https://attention-lab-production.up.railway.app';
+const TEST_MODE = false;
+
+const $ = (id) => document.getElementById(id);
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const nextFrame = () => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+const shuffle = (a) => { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
+const mean = (a) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : null);
+const ms = (v) => (v == null ? '—' : Math.round(v) + ' ms');
+function hash(s) { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0; return h; }
+
+$('cfg').textContent = `项目码 ${PROJECT} · 数据提交到 ${LAB}${TEST_MODE ? ' · 【测试模式】' : ''}`;
+if (PROJECT === 'ABC234') $('cfg').innerHTML = '<b class="warn">⚠ 还没改项目码！请把 index.html 顶部的 PROJECT 换成你的 6 位项目码。</b>';
+
+// ====================== 2. 画布与基础 ======================
+let ctx, W, H;
+function fitCanvas() {
+  const c = $('cv'); const dpr = window.devicePixelRatio || 1;
+  W = innerWidth; H = innerHeight;
+  c.width = W * dpr; c.height = H * dpr;
+  c.style.width = W + 'px'; c.style.height = H + 'px';
+  ctx = c.getContext('2d'); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+window.addEventListener('resize', fitCanvas);
+
+function hud(text) { $('hud').textContent = text; }
+function setLegend(html) { $('legend').innerHTML = html; }
+function feedback(html, color, msTime) {
+  return new Promise(async (res) => {
+    const f = $('fb'); f.innerHTML = html; f.style.color = color; f.style.display = 'block';
+    await sleep(msTime); f.style.display = 'none'; res();
+  });
+}
+function instruct(html, btnText = '继续') {
+  return new Promise((res) => {
+    const o = $('instruct');
+    o.innerHTML = `<div class="instruct-box">${html}<br><button id="instruct-btn">${btnText}</button></div>`;
+    o.style.display = 'flex';
+    $('instruct-btn').onclick = () => { o.style.display = 'none'; res(); };
+  });
+}
+
+let blurFlag = false;
+window.addEventListener('blur', () => { blurFlag = true; });
+function waitKey(valid, timeoutMs, t0) {
+  return new Promise((res) => {
+    let done = false;
+    const finish = (key, rt) => { if (done) return; done = true; window.removeEventListener('keydown', onKey); clearTimeout(to); res({ key, rt }); };
+    const onKey = (e) => { if (!valid.includes(e.code) || e.repeat) return; finish(e.code, performance.now() - t0); };
+    const to = setTimeout(() => finish(null, null), timeoutMs);
+    window.addEventListener('keydown', onKey);
+  });
+}
+
+// ====================== WebGazer 眼动 ======================
+let gazeActive = false, gazeRecording = false, gazeSamples = [];
+function startGazeRec() { if (gazeActive) { gazeSamples = []; gazeRecording = true; } }
+function stopGazeRec() { gazeRecording = false; return gazeActive ? gazeSamples.slice(0, 500) : []; }
+async function canUseCamera() {
+  try { if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return false; const s = await navigator.mediaDevices.getUserMedia({ video: true }); s.getTracks().forEach(t => t.stop()); return true; } catch (e) { return false; }
+}
+async function initGaze() {
+  if (typeof webgazer === 'undefined') return false;
+  if (!(await canUseCamera())) return false;
+  try {
+    webgazer.setRegression('ridge');
+    webgazer.setGazeListener((data) => { if (data && gazeRecording) { gazeSamples.push(Math.round(data.x), Math.round(data.y)); } });
+    webgazer.begin();
+    webgazer.showPredictionPoints(true);
+    await sleep(1500);
+    gazeActive = true;
+    return true;
+  } catch (e) { console.warn('眼动初始化失败', e); return false; }
+}
+async function calibrate() {
+  const pts = [[0.1, 0.1], [0.5, 0.1], [0.9, 0.1], [0.1, 0.5], [0.5, 0.5], [0.9, 0.5], [0.1, 0.9], [0.5, 0.9], [0.9, 0.9]];
+  for (const [fx, fy] of pts) {
+    const x = Math.round(fx * W), y = Math.round(fy * H);
+    ctx.fillStyle = '#202532'; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#C8A44A'; ctx.beginPath(); ctx.arc(x, y, 18, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.font = '700 20px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('盯住这个点', x, y - 36);
+    await sleep(900);
+    if (webgazer && webgazer.recordClickPosition) webgazer.recordClickPosition(x, y, 'click');
+  }
+  if (webgazer && webgazer.showPredictionPoints) webgazer.showPredictionPoints(false);
+  ctx.fillStyle = '#202532'; ctx.fillRect(0, 0, W, H);
+}
+
+// ====================== 3. 实验一：视觉搜索（W6） ======================
+const SEARCH_COLORS = { red: '#e0352b', blue: '#2a6fdb' };
+function drawSearchItem(x, y, color, shape, r) {
+  ctx.strokeStyle = color; ctx.lineWidth = 4;
+  if (shape === 'O') { ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.stroke(); }
+  else if (shape === 'X') { ctx.beginPath(); ctx.moveTo(x - r, y - r); ctx.lineTo(x + r, y + r); ctx.moveTo(x + r, y - r); ctx.lineTo(x - r, y + r); ctx.stroke(); }
+  else if (shape === 'Q') { ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.stroke(); ctx.beginPath(); ctx.moveTo(x + r * 0.55, y + r * 0.55); ctx.lineTo(x + r * 0.95, y + r * 0.95); ctx.stroke(); }
+}
+function searchLayout(n) {
+  const m = 80, cols = 10, rows = 6, cw = (W - 2 * m) / cols, ch = (H - 2 * m - 110) / rows;
+  const pts = [];
+  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) pts.push({ x: m + cw * (c + 0.5), y: m + ch * (r + 0.5) });
+  shuffle(pts); const jit = 20;
+  return pts.slice(0, n).map(p => ({ x: p.x + (Math.random() * 2 - 1) * jit, y: p.y + (Math.random() * 2 - 1) * jit }));
+}
+function drawSearch(tr, pts) {
+  ctx.clearRect(0, 0, W, H);
+  const N = tr.N; let items;
+  if (tr.type === 'feature') {
+    items = Array.from({ length: N }, (_, i) => ({ color: SEARCH_COLORS.blue, shape: i % 2 ? 'X' : 'O' }));
+    if (tr.present) items[Math.floor(Math.random() * N)] = { color: SEARCH_COLORS.red, shape: 'O' };
+  } else if (tr.type === 'conj') {
+    items = Array.from({ length: N }, (_, i) => ({ color: i % 2 ? SEARCH_COLORS.red : SEARCH_COLORS.blue, shape: i % 2 ? 'X' : 'O' }));
+    if (tr.present) items[Math.floor(Math.random() * N)] = { color: SEARCH_COLORS.red, shape: 'O' };
+  } else {
+    const col = '#0D2B5C';
+    if (tr.dir === 'Q') { items = Array.from({ length: N }, () => ({ color: col, shape: 'O' })); if (tr.present) items[Math.floor(Math.random() * N)] = { color: col, shape: 'Q' }; }
+    else { items = Array.from({ length: N }, () => ({ color: col, shape: 'Q' })); if (tr.present) items[Math.floor(Math.random() * N)] = { color: col, shape: 'O' }; }
+  }
+  for (let i = 0; i < N; i++) drawSearchItem(pts[i].x, pts[i].y, items[i].color, items[i].shape, 24);
+}
+function buildSearch() {
+  const list = [];
+  for (const type of ['feature', 'conj'])
+    for (const N of [4, 8, 16, 24]) for (const present of [1, 0]) for (let r = 0; r < 3; r++) list.push({ type, N, present, rep: r });
+  for (const dir of ['O', 'Q']) for (const N of [4, 8, 16]) for (const present of [1, 0]) for (let r = 0; r < 2; r++) list.push({ type: 'asym', dir, N, present, rep: r });
+  return list;
+}
+const SEARCH_KEYS = ['KeyF', 'KeyJ'];
+async function searchTrial(tr, practice) {
+  ctx.fillStyle = '#202532'; ctx.fillRect(0, 0, W, H);
+  ctx.strokeStyle = '#9aa3b2'; ctx.lineWidth = 3; const s = 14;
+  ctx.beginPath(); ctx.moveTo(W / 2 - s, H / 2); ctx.lineTo(W / 2 + s, H / 2); ctx.moveTo(W / 2, H / 2 - s); ctx.lineTo(W / 2, H / 2 + s); ctx.stroke();
+  await sleep(500);
+  drawSearch(tr, searchLayout(tr.N)); await nextFrame();
+  startGazeRec();
+  blurFlag = false; const t0 = performance.now();
+  const r = await waitKey(SEARCH_KEYS, 4000, t0);
+  const gaze = stopGazeRec();
+  const dirty = blurFlag ? 1 : 0;
+  ctx.fillStyle = '#202532'; ctx.fillRect(0, 0, W, H);
+  const want = tr.present ? 'KeyF' : 'KeyJ';
+  const ok = r.key === want;
+  await feedback(r.key == null ? '太慢了' : ok ? '✓' : '✗', r.key == null ? '#ffd54a' : ok ? '#7CFC9A' : '#ff8a80', 350);
+  await sleep(350);
+  return { type: tr.type, dir: tr.dir || '', N: tr.N, present: tr.present, key: r.key || '', rt: r.rt == null ? 0 : Math.round(r.rt), correct: ok ? 1 : 0, timeout: r.key == null ? 1 : 0, dirty, ...(gaze.length ? { samples: gaze } : {}) };
+}
+async function runSearch(order) {
+  setLegend('');
+  const trials = [];
+  const label = { feature: '特征搜索（颜色）', conj: '联合搜索（颜色×形状）', asym: '不对称（O vs Q）' };
+  const sample = { feature: '目标 <span class="red">O</span>，干扰 <span class="blue">O</span> <span class="blue">X</span>', conj: '目标 <span class="red">O</span>，干扰 <span class="red">X</span> <span class="blue">O</span>', asym: '目标 <span class="navy">O</span> 或 <span class="navy">Q</span>（同色，看小尾巴）' };
+  for (const type of order) {
+    await instruct(`<h2>视觉搜索 · ${label[type]}</h2>
+      <p>每屏出现若干字母，判断其中<b>有没有</b>目标：</p>
+      <p class="sample">${sample[type]}</p>
+      <p>有 → <kbd>F</kbd>　没有 → <kbd>J</kbd>。每屏先看中央十字。</p>
+      ${type === 'asym' ? '<p class="muted">改进条件：Q 比 O 多一条小尾巴。找「有尾巴的 Q」应更快（特征出现→跳出），找「没有尾巴的 O」更慢（特征缺失→逐个搜）。</p>' : ''}`, '开始练习');
+    for (let k = 0; k < 3; k++) {
+      const pr = k % 2 ? 1 : 0;
+      const tr = type === 'asym' ? { type, dir: k % 2 ? 'O' : 'Q', N: [4, 8, 16][k], present: pr } : { type, N: [4, 8, 16][k], present: pr };
+      hud(`搜索练习 ${k + 1}/3`); await searchTrial(tr, true);
+    }
+    await instruct(`<h2>练习结束</h2><p>正式作答：${label[type]}。</p>`, '开始');
+    const list = shuffle(buildSearch().filter(t => t.type === type));
+    for (let k = 0; k < list.length; k++) { hud(`搜索 ${label[type]} ${k + 1}/${list.length}`); trials.push(await searchTrial(list[k], false)); }
+  }
+  return trials;
+}
+
+// ====================== 4. 实验二：Cleveland–McGill（W7） ======================
+const CM_RATIOS = [17.8, 26.1, 46.4, 68.1, 82.5];
+const CM_ENC = ['position', 'length', 'angle', 'area', 'angle3d'];
+const CM_LABEL = { position: '位置（共同轴）', length: '长度（浮动条）', angle: '角度（饼图）', area: '面积（气泡）', angle3d: '角度 3D（改进）' };
+function cmLabel(txt, x, y) { ctx.fillStyle = '#c62828'; ctx.font = '800 30px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(txt, x, y); }
+function makeCmValues(r) {
+  const A = 62 + Math.random() * 33, B = A * r / 100, n = 5;
+  const vals = Array.from({ length: n }, () => 12 + Math.random() * 83);
+  const idx = shuffle([0, 1, 2, 3, 4]); vals[idx[0]] = A; vals[idx[1]] = B;
+  return { vals, ia: idx[0], ib: idx[1] };
+}
+function drawCm(enc, t) {
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H);
+  const { vals, ia, ib } = t, n = vals.length, cx = W / 2, cy = H / 2;
+  ctx.lineWidth = 2.5; ctx.strokeStyle = '#0D2B5C';
+  if (enc === 'position' || enc === 'length') {
+    const bw = Math.min(110, W / (n * 2.4)), gap = bw * 0.6, x0 = cx - (n * bw + (n - 1) * gap) / 2, base = cy + 150, k = 4.5;
+    if (enc === 'position') { ctx.beginPath(); ctx.moveTo(x0 - 30, base); ctx.lineTo(x0 + n * bw + (n - 1) * gap + 30, base); ctx.stroke(); ctx.beginPath(); ctx.moveTo(x0 - 30, base); ctx.lineTo(x0 - 30, base - 560); ctx.stroke(); }
+    vals.forEach((v, i) => {
+      const off = enc === 'length' ? Math.random() * 150 : 0, h = v * k, x = x0 + i * (bw + gap), y = base - off - h;
+      ctx.fillStyle = '#dfe6f0'; ctx.fillRect(x, y, bw, h); ctx.strokeRect(x, y, bw, h);
+      if (i === ia) cmLabel('A', x + bw / 2, y - 24); if (i === ib) cmLabel('B', x + bw / 2, y - 24);
+    });
+  } else if (enc === 'angle' || enc === 'angle3d') {
+    const R = Math.min(280, H * 0.42), sy = enc === 'angle3d' ? 0.55 : 1, sum = vals.reduce((a, b) => a + b, 0);
+    ctx.save(); if (enc === 'angle3d') { ctx.translate(cx, cy); ctx.scale(1, sy); ctx.translate(-cx, -cy); }
+    let a0 = 0; const marks = [];
+    vals.forEach((v, i) => {
+      const a1 = a0 + v / sum * Math.PI * 2;
+      ctx.beginPath(); ctx.moveTo(cx, cy); ctx.arc(cx, cy, R, a0, a1); ctx.closePath(); ctx.fillStyle = '#dfe6f0'; ctx.fill(); ctx.stroke();
+      const am = (a0 + a1) / 2; if (i === ia || i === ib) marks.push({ t: i === ia ? 'A' : 'B', am });
+      a0 = a1;
+    });
+    ctx.restore();
+    for (const m of marks) cmLabel(m.t, cx + Math.cos(m.am) * R * 0.6, cy + Math.sin(m.am) * R * 0.6 * sy);
+  } else if (enc === 'area') {
+    const Rmax = 95;
+    vals.forEach((v, i) => {
+      const r = Rmax * Math.sqrt(v / 95), x = cx + (i - (n - 1) / 2) * (Rmax * 2 + 26), y = cy;
+      ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fillStyle = '#dfe6f0'; ctx.fill(); ctx.stroke();
+      if (i === ia || i === ib) cmLabel(i === ia ? 'A' : 'B', x, y - r - 24);
+    });
+  }
+}
+function askPercent(t0) {
+  return new Promise((res) => {
+    const d = document.createElement('div');
+    d.style.cssText = 'position:absolute;left:50%;bottom:4%;transform:translateX(-50%);background:#0D2B5C;color:#fff;border-radius:14px;padding:14px 22px;display:flex;gap:14px;align-items:center;font-size:20px;z-index:5;box-shadow:0 6px 20px rgba(0,0,0,.25)';
+    d.innerHTML = '<span><b style="color:#C8A44A">B</b> 是 <b style="color:#C8A44A">A</b> 的</span><input id="cmnum" type="number" min="0" max="100" step="1" style="width:80px;font-size:22px;padding:4px 8px;border-radius:8px;border:none;text-align:center">%<button id="cmok" style="background:#C8A44A;color:#fff;border:none;border-radius:8px;padding:8px 18px;font-size:18px;cursor:pointer">确定</button>';
+    $('stage').appendChild(d);
+    const num = document.getElementById('cmnum'), ok = document.getElementById('cmok');
+    const done = () => { const v = parseFloat(num.value); if (!isFinite(v) || v < 0 || v > 100) return; const rt = performance.now() - t0; window.removeEventListener('keydown', onKey, true); d.remove(); res({ judged: v, rt: Math.round(rt) }); };
+    const onKey = (e) => { if (e.code === 'Enter' || e.code === 'NumpadEnter') { e.preventDefault(); done(); } };
+    ok.onclick = done; window.addEventListener('keydown', onKey, true); setTimeout(() => num.focus(), 30);
+  });
+}
+async function cmTrial(enc, r, practice) {
+  const t = makeCmValues(r);
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H); await sleep(300);
+  drawCm(enc, t);
+  startGazeRec();
+  blurFlag = false; const t0 = performance.now();
+  const a = await askPercent(t0);
+  const gaze = stopGazeRec();
+  const dirty = blurFlag ? 1 : 0;
+  if (practice) await feedback(`正确答案 ${Math.round(r)}%（你估 ${Math.round(a.judged)}%）`, '#0D2B5C', 1400);
+  return { enc, r, judged: a.judged, rt: a.rt, dirty, ...(gaze.length ? { samples: gaze } : {}) };
+}
+async function runCm() {
+  setLegend('');
+  const trials = [];
+  await instruct(`<h2>估一估：B 是 A 的百分之几？</h2>
+    <p>每一屏有 5 个图形，其中两个标了 <b style="color:#c62828">A</b> 和 <b style="color:#c62828">B</b>（A 总是较大的那个）。</p>
+    <p>请<b>凭第一眼估计</b>：B 的数值是 A 的百分之几？在下方输入 0–100 的数，按 <kbd>Enter</kbd> 或点「确定」。不要用尺子量。</p>
+    <p>同样的数会用 5 种方式画：位置、长度、角度（饼图）、面积（气泡）、角度 3D。</p>
+    <p class="muted">Cleveland & McGill（1984）发现编码方式不同、估计误差差别很大——看看你的排序。先练习（有答案），再正式作答。</p>`, '开始练习');
+  for (let k = 0; k < 2; k++) { hud(`估一估 练习 ${k + 1}/2`); await cmTrial(CM_ENC[k], CM_RATIOS[k], true); }
+  await instruct(`<h2>练习结束</h2><p>正式开始，不再显示答案。凭第一眼估计即可。</p>`, '开始');
+  const list = shuffle(CM_ENC.flatMap(enc => CM_RATIOS.flatMap(r => [r, r]).map(r => ({ enc, r }))));
+  for (let k = 0; k < list.length; k++) { hud(`估一估 ${k + 1}/${list.length} · ${CM_LABEL[list[k].enc]}`); trials.push(await cmTrial(list[k].enc, list[k].r, false)); }
+  return trials;
+}
+
+// ====================== 5. 实验三：FORT 地图（W8） ======================
+const FORT_KEYS = ['ArrowLeft', 'ArrowRight'];
+function makeFortScene(side) {
+  const target = { x: (side === 'L' ? -1 : 1) * 260, y: -220 };
+  const blocks = [], xs = [-620, -310, 0, 310, 620], ys = [-520, -260, 0, 260];
+  for (let i = 0; i < xs.length - 1; i++) for (let j = 0; j < ys.length - 1; j++) {
+    const cx = (xs[i] + xs[i + 1]) / 2, cy = (ys[j] + ys[j + 1]) / 2;
+    if (Math.abs(cx) < 100 || Math.abs(cy + 220) < 90) continue;
+    const r = Math.random();
+    blocks.push({ x: xs[i] + 26, y: ys[j] + 26, w: xs[i + 1] - xs[i] - 52, h: ys[j + 1] - ys[j] - 52, kind: r < 0.22 ? 'park' : r < 0.33 ? 'water' : 'bldg' });
+  }
+  return { side, blocks, target };
+}
+function fortRoad(ctx, x1, y1, x2, y2) { ctx.lineCap = 'butt'; ctx.strokeStyle = '#c3c8d0'; ctx.lineWidth = 52; ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke(); ctx.strokeStyle = '#fff'; ctx.lineWidth = 44; ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke(); }
+function drawFort(sc, mode, h) {
+  const CX = W / 2, CY = H / 2, HALF = Math.floor(Math.min(W, H) * 0.46);
+  const a = mode === 'north' ? h * Math.PI / 180 : 0;
+  ctx.fillStyle = '#1b1f27'; ctx.fillRect(0, 0, W, H);
+  ctx.save(); ctx.beginPath(); ctx.rect(CX - HALF, CY - HALF, HALF * 2, HALF * 2); ctx.clip();
+  ctx.fillStyle = '#eef0e6'; ctx.fillRect(CX - HALF, CY - HALF, HALF * 2, HALF * 2);
+  ctx.translate(CX, CY); ctx.rotate(a);
+  for (const b of sc.blocks) { ctx.fillStyle = b.kind === 'park' ? '#cfe5c0' : b.kind === 'water' ? '#bcd6ee' : '#e2ddd2'; ctx.fillRect(b.x, b.y, b.w, b.h); }
+  fortRoad(ctx, 0, 700, 0, -700); fortRoad(ctx, -700, -220, 700, -220);
+  ctx.fillStyle = '#1565c0'; ctx.strokeStyle = '#fff'; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.moveTo(0, -30); ctx.lineTo(22, 22); ctx.lineTo(0, 12); ctx.lineTo(-22, 22); ctx.closePath(); ctx.fill(); ctx.stroke();
+  const tx = sc.target.x, ty = sc.target.y;
+  ctx.fillStyle = '#c62828'; ctx.beginPath(); ctx.arc(tx, ty, 16, 0, Math.PI * 2); ctx.fill(); ctx.strokeStyle = '#fff'; ctx.stroke();
+  ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(tx, ty, 5, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#c62828'; ctx.font = '700 18px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('目的地', tx, ty - 30);
+  ctx.restore();
+  // 指北针
+  const pcx = CX + HALF - 52, pcy = CY - HALF + 52, pa = mode === 'north' ? 0 : -h * Math.PI / 180;
+  ctx.save(); ctx.translate(pcx, pcy);
+  ctx.fillStyle = 'rgba(255,255,255,.92)'; ctx.beginPath(); ctx.arc(0, 0, 30, 0, Math.PI * 2); ctx.fill(); ctx.strokeStyle = '#9aa3b2'; ctx.lineWidth = 2; ctx.stroke();
+  ctx.rotate(pa); ctx.fillStyle = '#c62828'; ctx.beginPath(); ctx.moveTo(0, -18); ctx.lineTo(6, 2); ctx.lineTo(-6, 2); ctx.closePath(); ctx.fill(); ctx.restore();
+  ctx.fillStyle = '#c62828'; ctx.font = '700 14px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('北', pcx, pcy - 40);
+  // 模式标签
+  ctx.fillStyle = '#cfd6e2'; ctx.font = '600 20px sans-serif'; ctx.textAlign = 'center';
+  ctx.fillText(mode === 'north' ? '北向上（north-up）' : '航向上（track-up）', W * 0.2, CY);
+  ctx.fillStyle = '#fff'; ctx.font = '600 26px sans-serif';
+  ctx.fillText('下一个路口，目的地在车的左边还是右边？', CX, CY + HALF + 40);
+  ctx.fillStyle = '#8e97a8'; ctx.font = '500 20px sans-serif';
+  ctx.fillText('← 左边　　→ 右边（以车头方向为准）', CX, CY + HALF + 76);
+}
+async function fortTrial(cond, h, side, practice) {
+  const sc = makeFortScene(side);
+  ctx.fillStyle = '#1b1f27'; ctx.fillRect(0, 0, W, H);
+  const CX = W / 2, CY = H / 2, s = 16;
+  ctx.strokeStyle = '#cfd6e2'; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(CX - s, CY); ctx.lineTo(CX + s, CY); ctx.moveTo(CX, CY - s); ctx.lineTo(CX, CY + s); ctx.stroke();
+  await sleep(350);
+  drawFort(sc, cond === 'track' ? 'track' : 'north', h); await nextFrame();
+  startGazeRec();
+  blurFlag = false; const t0 = performance.now();
+  const r = await waitKey(FORT_KEYS, 6000, t0);
+  const gaze = stopGazeRec();
+  const dirty = blurFlag ? 1 : 0;
+  ctx.fillStyle = '#1b1f27'; ctx.fillRect(0, 0, W, H);
+  const ok = r.key === side;
+  await feedback(r.key == null ? '太慢了' : ok ? '✓' : '✗ 反了', r.key == null ? '#ffd54a' : ok ? '#7CFC9A' : '#ff8a80', practice ? 800 : 380);
+  await sleep(300);
+  return { cond, h, side, key: r.key || '', rt: r.rt == null ? 0 : Math.round(r.rt), correct: ok ? 1 : 0, timeout: r.key == null ? 1 : 0, dirty, ...(gaze.length ? { samples: gaze } : {}) };
+}
+async function runFort(order) {
+  setLegend('');
+  const trials = [];
+  const blockOf = { track: { mode: 'track', label: '航向上（地图随车转，车头永远朝上）' }, north: { mode: 'north', label: '北向上（地图不转、北永远朝上，车箭头会朝各个方向）' } };
+  for (const b of order) {
+    const B = blockOf[b];
+    await instruct(`<h2>目的地在左还是右？</h2>
+      <p><b style="color:#1565c0">蓝色箭头</b>是你的车，正开向<b>下一个路口</b>；<b style="color:#c62828">红点</b>是目的地。</p>
+      <p>请判断：到了下一个路口，目的地在<b>你的车的左边还是右边</b>（以车头方向为准，不是屏幕左右）。</p>
+      <p style="text-align:center"><kbd>←</kbd> 左边　　<kbd>→</kbd> 右边</p>
+      <p>这一段：<b>${B.label}</b>。</p>
+      ${b === 'north' ? '<p class="muted">改进条件：北向上地图里车的航向会变化（朝北 0°、朝东/西 90°、朝南 180°）——航向与「上」的夹角越大，你越需要把地图在脑子里转过来，反应越慢。</p>' : ''}`, '开始练习');
+    for (let k = 0; k < 3; k++) { hud(`地图 练习 ${k + 1}/3`); await fortTrial(b === 'track' ? 'track' : 'north', [0, 90, 180][k], k % 2 ? 'R' : 'L', true); }
+    await instruct(`<h2>练习结束</h2><p>正式作答：${B.label}。</p>`, '开始');
+    const list = b === 'track'
+      ? shuffle(Array.from({ length: 12 }, (_, k) => ({ cond: 'track', h: 0, side: k % 2 ? 'R' : 'L' })))
+      : shuffle(['north0', 'north90', 'north180'].flatMap(c => Array.from({ length: 12 }, (_, k) => ({ cond: c, h: c === 'north0' ? 0 : c === 'north90' ? (k % 4 < 2 ? 90 : -90) : 180, side: k % 2 ? 'R' : 'L' }))));
+    for (let k = 0; k < list.length; k++) { hud(`地图 ${k + 1}/${list.length}`); trials.push(await fortTrial(list[k].cond, list[k].h, list[k].side, false)); }
+  }
+  return trials;
+}
+
+// ====================== 6. 提交与读取 ======================
+async function submitData(participant, experiment, trials) {
+  const exp = (TEST_MODE ? 'test_' : '') + experiment;
+  try {
+    const res = await fetch(LAB + '/api/hw2/submit', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ project: PROJECT, experiment: exp, participant, trials, meta: { ua: navigator.userAgent.slice(0, 80), w: innerWidth, h: innerHeight } }),
+    });
+    const r = await res.json();
+    if (!r.ok) throw new Error(r.msg);
+    return { ok: true, r };
+  } catch (e) { return { ok: false, err: e.message }; }
+}
+async function loadAll(experiment) {
+  const r = await (await fetch(`${LAB}/api/hw2/data?project=${PROJECT}&experiment=${experiment}`)).json();
+  if (!r.ok) throw new Error(r.msg);
+  return r.records;
+}
+
+// ====================== 7. 分析与结果 ======================
+function validRT(t) { return t.correct === 1 && t.rt > 0; }
+function meanRT(trials, filter) { const a = trials.filter(t => filter(t) && validRT(t)).map(t => t.rt); return a.length ? mean(a) : null; }
+function slope(xs, ys) { const n = xs.length; if (n < 2) return null; const mx = mean(xs), my = mean(ys); let num = 0, den = 0; for (let i = 0; i < n; i++) { num += (xs[i] - mx) * (ys[i] - my); den += (xs[i] - mx) * (xs[i] - mx); } return den ? num / den : null; }
+function searchSlope(trials, filter) {
+  const Ns = [...new Set(trials.filter(filter).map(t => t.N))].sort((a, b) => a - b);
+  const xs = [], ys = [];
+  for (const N of Ns) { const m = meanRT(trials, t => filter(t) && t.N === N); if (m != null) { xs.push(N); ys.push(m); } }
+  return { Ns: xs, slope: slope(xs, ys) };
+}
+function cmErr(trials, filter) { const a = trials.filter(filter).map(t => Math.abs(t.judged - t.r)); return a.length ? mean(a) : null; }
+function renderHeatmap(trials) {
+  const pts = [];
+  for (const t of trials) { const s = t.samples || []; for (let i = 0; i + 1 < s.length; i += 2) pts.push([s[i], s[i + 1]]); }
+  const el = document.getElementById('heat');
+  if (!el || !pts.length) return;
+  const c = document.createElement('canvas');
+  c.width = 800; c.height = Math.max(300, Math.round(800 * H / W));
+  c.style.cssText = 'width:100%;border-radius:10px;background:#202532;margin-top:8px';
+  const x = c.getContext('2d'); x.fillStyle = '#202532'; x.fillRect(0, 0, c.width, c.height);
+  for (const [gx, gy] of pts) { x.fillStyle = 'rgba(200,164,74,0.05)'; x.beginPath(); x.arc(gx / W * c.width, gy / H * c.height, 9, 0, Math.PI * 2); x.fill(); }
+  el.appendChild(c);
+}
+function fitLine(xs, ys) {
+  const n = xs.length; if (n < 2) return null;
+  const mx = mean(xs), my = mean(ys); let num = 0, den = 0;
+  for (let i = 0; i < n; i++) { num += (xs[i] - mx) * (ys[i] - my); den += (xs[i] - mx) * (xs[i] - mx); }
+  if (!den) return null;
+  const s = num / den; return { slope: s, intercept: my - s * mx };
+}
+function renderSearchChart(trials) {
+  const el = document.getElementById('searchchart');
+  if (!el) return;
+  const c = document.createElement('canvas'); c.width = 760; c.height = 430;
+  c.style.cssText = 'width:100%;border-radius:10px;background:#fff;margin-top:8px;border:1px solid #e0e4eb';
+  const x = c.getContext('2d');
+  const P = { l: 60, r: 16, t: 28, b: 46 }, plotW = c.width - P.l - P.r, plotH = c.height - P.t - P.b;
+  const Ns = [4, 8, 16, 24], maxRT = 1800;
+  const X = n => P.l + (n - 4) / 20 * plotW;
+  const Y = rt => P.t + (1 - rt / maxRT) * plotH;
+  x.strokeStyle = '#c8ccd4'; x.lineWidth = 1;
+  x.beginPath(); x.moveTo(P.l, P.t); x.lineTo(P.l, P.t + plotH); x.lineTo(P.l + plotW, P.t + plotH); x.stroke();
+  x.fillStyle = '#788296'; x.font = '13px sans-serif'; x.textAlign = 'center'; x.textBaseline = 'middle';
+  for (const n of Ns) x.fillText(n, X(n), P.t + plotH + 20);
+  for (let rt = 0; rt <= maxRT; rt += 400) { x.fillText(rt, P.l - 8, Y(rt)); x.strokeStyle = '#eef0f4'; x.beginPath(); x.moveTo(P.l, Y(rt)); x.lineTo(P.l + plotW, Y(rt)); x.stroke(); }
+  x.fillText('RT (ms)', P.l - 44, P.t - 8); x.fillText('集合大小 N', P.l + plotW / 2, c.height - 10);
+  const series = [
+    { color: '#2a6fdb', filter: t => t.type === 'feature' && t.present === 1, label: '特征搜索·有目标（本人）' },
+    { color: '#e0352b', filter: t => t.type === 'conj' && t.present === 1, label: '联合搜索·有目标（本人）' },
+  ];
+  for (const s of series) {
+    const xs = [], ys = [];
+    for (const N of Ns) { const a = trials.filter(t => s.filter(t) && t.N === N && t.correct === 1 && t.rt > 0).map(t => t.rt); if (a.length) { xs.push(N); ys.push(mean(a)); } }
+    x.fillStyle = s.color; x.strokeStyle = s.color; x.lineWidth = 2;
+    for (let i = 0; i < xs.length; i++) { x.beginPath(); x.arc(X(xs[i]), Y(ys[i]), 5, 0, Math.PI * 2); x.fill(); }
+    const f = fitLine(xs, ys);
+    if (f) { x.beginPath(); x.moveTo(X(4), Y(f.intercept + f.slope * 4)); x.lineTo(X(24), Y(f.intercept + f.slope * 24)); x.stroke(); }
+  }
+  const refs = [
+    { slope: 3.1, color: '#2a6fdb', label: '特征·有（原文 3.1 ms/项）' },
+    { slope: 28.7, color: '#e0352b', label: '联合·有（原文 28.7 ms/项）' },
+  ];
+  const refY0 = 420;
+  x.setLineDash([6, 5]);
+  for (const r of refs) { x.strokeStyle = r.color; x.lineWidth = 1.5; x.beginPath(); x.moveTo(X(4), Y(refY0)); x.lineTo(X(24), Y(refY0 + r.slope * 20)); x.stroke(); }
+  x.setLineDash([]);
+  x.font = '12px sans-serif'; x.textAlign = 'left'; x.textBaseline = 'middle';
+  let ly = P.t + 4;
+  for (const s of series) { x.fillStyle = s.color; x.fillRect(P.l + 6, ly - 1, 18, 3); x.fillStyle = '#323c50'; x.fillText(s.label, P.l + 30, ly); ly += 18; }
+  for (const r of refs) { x.strokeStyle = r.color; x.beginPath(); x.moveTo(P.l + 6, ly); x.lineTo(P.l + 24, ly); x.stroke(); x.fillStyle = '#788296'; x.fillText(r.label, P.l + 30, ly); ly += 18; }
+  el.appendChild(c);
+}
+
+async function showResults(mine, notes) {
+  let html = `<h2>你的结果</h2>`;
+  html += `<h3>视觉搜索（斜率 ms/项，越大越「逐个找」）</h3><table><tr><th>条件</th><th>有目标斜率</th><th>无目标斜率</th></tr>`;
+  const sc = { fP: searchSlope(mine.search, t => t.type === 'feature' && t.present === 1), fA: searchSlope(mine.search, t => t.type === 'feature' && t.present === 0), cP: searchSlope(mine.search, t => t.type === 'conj' && t.present === 1), cA: searchSlope(mine.search, t => t.type === 'conj' && t.present === 0), oP: searchSlope(mine.search, t => t.type === 'asym' && t.dir === 'O' && t.present === 1), qP: searchSlope(mine.search, t => t.type === 'asym' && t.dir === 'Q' && t.present === 1) };
+  const f = (s) => s && s.slope != null ? s.slope.toFixed(1) : '—';
+  html += `<tr><td>特征搜索</td><td><b>${f(sc.fP)}</b></td><td>${f(sc.fA)}</td></tr><tr><td>联合搜索</td><td><b>${f(sc.cP)}</b></td><td>${f(sc.cA)}</td></tr><tr><td>不对称 · 找O(缺特征)</td><td><b>${f(sc.oP)}</b></td><td>—</td></tr><tr><td>不对称 · 找Q(有特征)</td><td><b>${f(sc.qP)}</b></td><td>—</td></tr></table>`;
+  html += `<p class="muted">参考（Treisman & Gelade 1980）：特征 有 3.1 / 无 25.1；联合 有 28.7 / 67.1。</p>`;
+  html += `<h3>搜索斜率模型可视化（FIT）</h3><p class="muted">实线=你的数据拟合，虚线=原文斜率。特征搜索近于平行、联合搜索递增。</p><div id="searchchart"></div>`;
+  if (gazeActive) html += `<h3>你的注视热力图（视觉搜索）</h3><p class="muted">颜色越深代表注视越集中。</p><div id="heat"></div>`;
+
+  html += `<h3>Cleveland–McGill（平均估计误差，百分点，越小越准）</h3><table><tr><th>编码</th><th>平均误差</th></tr>`;
+  for (const enc of CM_ENC) html += `<tr><td>${CM_LABEL[enc]}</td><td><b>${cmErr(mine.cm, t => t.enc === enc)?.toFixed(1) ?? '—'}</b></td></tr>`;
+  html += `</table><p class="muted">预测排序：位置 &lt; 长度 &lt; 角度 &lt; 面积，且 3D 角度 &gt; 角度（3D 失真更差）。</p>`;
+
+  html += `<h3>FORT 地图（正确反应时）</h3><table><tr><th>条件</th><th>反应时</th><th>正确率</th></tr>`;
+  const fortConds = ['track', 'north0', 'north90', 'north180'], fortName = { track: '航向上（对齐）', north0: '北向上 · 0°', north90: '北向上 · 90°', north180: '北向上 · 180°' };
+  for (const c of fortConds) {
+    const rt = meanRT(mine.fort, t => t.cond === c);
+    const corr = mine.fort.filter(t => t.cond === c); const acc = corr.length ? (corr.filter(t => t.correct === 1).length / corr.length * 100) : null;
+    html += `<tr><td>${fortName[c]}</td><td><b>${ms(rt)}</b></td><td>${acc != null ? acc.toFixed(0) + '%' : '—'}</td></tr>`;
+  }
+  html += `</table><p class="muted">预测：航向上 ≈ 0° &lt; 90° &lt; 180°（旋转代价，心理旋转）。</p>`;
+
+  html += `<p class="muted">${notes.join('<br>')}</p><h2>全体被试（匿名）</h2>`;
+  try {
+    html += `<table><tr><th>实验</th><th>被试数</th><th>核心效应</th></tr>`;
+    const recs = { search: await loadAll('search'), cm: await loadAll('cm'), fort: await loadAll('fort') };
+    for (const exp of ['search', 'cm', 'fort']) {
+      const rs = recs[exp], last = {}; for (const r of rs) last[r.participant] = r;
+      const n = Object.keys(last).length;
+      const all = rs.flatMap(r => r.trials);
+      let eff = '—';
+      if (exp === 'search') { const s = searchSlope(all, t => t.type === 'feature' && t.present === 1); eff = `特征搜索有目标斜率 ${f(s)}`; }
+      else if (exp === 'cm') { const e = cmErr(all, t => t.enc === 'position'); eff = `位置编码平均误差 ${e != null ? e.toFixed(1) : '—'}`; }
+      else { const t = meanRT(all, t => t.cond === 'track'), n0 = meanRT(all, t => t.cond === 'north180'); eff = `航向上 ${ms(t)} vs 180° ${ms(n0)}`; }
+      html += `<tr><td>${exp}</td><td>${n}</td><td>${eff}</td></tr>`;
+    }
+    html += `</table>`;
+  } catch (e) { html += `<p class="muted">暂时读不到全体数据：${e.message}</p>`; }
+  $('result').innerHTML = html; $('result').style.display = '';
+  if (gazeActive) renderHeatmap(mine.search);
+  renderSearchChart(mine.search);
+}
+
+// ====================== 8. 主流程 ======================
+async function start(useGaze) {
+  const participant = $('pid').value.trim();
+  if (!participant) return alert('请先填写昵称或编号');
+  $('intro').style.display = 'none'; $('stage').style.display = 'block'; fitCanvas();
+
+  gazeActive = false;
+  if (useGaze) {
+    await instruct(`<h2>摄像头眼动说明</h2><p>将开启摄像头估计你的注视点。<b>视频只在本地浏览器处理，绝不上传</b>，只记录屏幕上的注视坐标。请坐正、保持头部基本不动。</p><p>同意则进入校准。</p>`, '同意并校准');
+    const ok = await initGaze();
+    if (!ok) {
+      await instruct(`<h2>无法启用摄像头</h2><p>可能没有摄像头、被浏览器拒绝，或页面不是 <b>localhost / https</b>（双击 <code>file://</code> 打不开摄像头）。将改用<b>鼠标模式</b>，只记录按键。</p>`, '继续');
+    } else {
+      await instruct(`<h2>开始 9 点校准</h2><p>下面会依次出现 9 个点，请<b>盯着每个点</b>、保持头部不动，每个点约 1 秒。</p>`, '开始校准');
+      await calibrate();
+    }
+  }
+
+  const ph = hash(participant);
+  const searchOrder = ((ph >> 1) % 2) ? ['conj', 'feature', 'asym'] : ['feature', 'conj', 'asym'];
+  const fortOrder = (ph % 2) ? ['track', 'north'] : ['north', 'track'];
+  const mine = {}, notes = [];
+  if (gazeActive) notes.push('眼动已开启（每个试次记录注视坐标 samples）');
+
+  await instruct(`<h2>第 1/3 段：搜索目标（视觉搜索）</h2><p>准备好了就开始。</p>`, '开始');
+  mine.search = await runSearch(searchOrder);
+  { const s = await submitData(participant, 'search', mine.search); notes.push(s.ok ? `✓ search 已提交（已有 ${s.r.participants} 名被试）` + (s.r.warnings ? `<br>⚠ ${s.r.warnings.join('；')}` : '') : `✗ search 提交失败：${s.err}`); }
+
+  await instruct(`<h2>第 2/3 段：估一估（Cleveland–McGill）</h2><p>准备好了就开始。</p>`, '开始');
+  mine.cm = await runCm();
+  { const s = await submitData(participant, 'cm', mine.cm); notes.push(s.ok ? `✓ cm 已提交` + (s.r.warnings ? `<br>⚠ ${s.r.warnings.join('；')}` : '') : `✗ cm 提交失败：${s.err}`); }
+
+  await instruct(`<h2>第 3/3 段：判断地图方向（FORT）</h2><p>最后一段，准备好了就开始。</p>`, '开始');
+  mine.fort = await runFort(fortOrder);
+  { const s = await submitData(participant, 'fort', mine.fort); notes.push(s.ok ? `✓ fort 已提交` + (s.r.warnings ? `<br>⚠ ${s.r.warnings.join('；')}` : '') : `✗ fort 提交失败：${s.err}`); }
+
+  $('stage').style.display = 'none';
+  await showResults(mine, notes);
+}
+$('go').onclick = () => start(true);
+$('go-mouse').onclick = () => start(false);
+</script>
+</body>
+</html>
