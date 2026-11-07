@@ -165,26 +165,32 @@ function hideWebcam() {
   const vc = document.getElementById('webgazerVideoCanvas'); if (vc) vc.style.cssText = off;
   try { if (webgazer && webgazer.showFaceOverlay) webgazer.showFaceOverlay(false); } catch (e) {}
 }
-function showCalibDot(x, y, hint) {
+function showCalibDot(x, y, hint, nClicks = 1, onEach) {
   return new Promise((res) => {
-    ctx.fillStyle = '#202532'; ctx.fillRect(0, 0, W, H);
-    ctx.fillStyle = '#C8A44A'; ctx.beginPath(); ctx.arc(x, y, 20, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = '#fff'; ctx.font = '700 22px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(hint, W / 2, H - 74);
-    ctx.fillStyle = '#9aa3b2'; ctx.font = '500 16px sans-serif'; ctx.fillText('盯着这个点，然后点击它（或按空格/回车）', W / 2, H - 46);
-    const done = () => { window.removeEventListener('click', onClick); window.removeEventListener('keydown', onKey); res(); };
-    const onClick = () => done();
-    const onKey = (e) => { if (e.code === 'Space' || e.code === 'Enter') { e.preventDefault(); done(); } };
+    let clicked = 0;
+    const draw = () => {
+      ctx.fillStyle = '#202532'; ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = '#C8A44A'; ctx.beginPath(); ctx.arc(x, y, 20, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#fff'; ctx.font = '700 22px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(nClicks > 1 ? `${hint}（${clicked}/${nClicks}）` : hint, W / 2, H - 74);
+      ctx.fillStyle = '#9aa3b2'; ctx.font = '500 16px sans-serif';
+      ctx.fillText(nClicks > 1 ? '盯着这个点，连续点击它（或按空格/回车）' : '盯着这个点，然后点击它（或按空格/回车）', W / 2, H - 46);
+    };
+    draw();
+    const doClick = () => { if (onEach) onEach(); clicked++; if (clicked >= nClicks) { window.removeEventListener('click', onClick); window.removeEventListener('keydown', onKey); res(); } else draw(); };
+    const onClick = () => doClick();
+    const onKey = (e) => { if (e.code === 'Space' || e.code === 'Enter') { e.preventDefault(); doClick(); } };
     window.addEventListener('click', onClick);
     window.addEventListener('keydown', onKey);
   });
 }
 async function calibrate() {
   const pts = [[0.1, 0.1], [0.5, 0.1], [0.9, 0.1], [0.1, 0.5], [0.5, 0.5], [0.9, 0.5], [0.1, 0.9], [0.5, 0.9], [0.9, 0.9]];
+  const N = 5; // 每个点点击 5 次，提高校准精度
   for (let i = 0; i < pts.length; i++) {
     const [fx, fy] = pts[i];
     const x = Math.round(fx * W), y = Math.round(fy * H);
-    await showCalibDot(x, y, `校准 ${i + 1}/${pts.length}`);
-    if (webgazer && webgazer.recordClickPosition) webgazer.recordClickPosition(x, y, 'click');
+    await showCalibDot(x, y, `校准 ${i + 1}/${pts.length}`, N, () => { if (webgazer && webgazer.recordClickPosition) webgazer.recordClickPosition(x, y, 'click'); });
   }
   if (webgazer && webgazer.showPredictionPoints) webgazer.showPredictionPoints(false);
   ctx.fillStyle = '#202532'; ctx.fillRect(0, 0, W, H);
